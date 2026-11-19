@@ -1,10 +1,10 @@
 /**
  * Email Utility
- * Handles email sending for booking confirmations and contact forms
- * Uses Resend for reliable email delivery on Vercel
+ * Booking confirmations, invoices, contact form, and admin alerts.
+ * Sends through the Postal server at postal.zoepayhub.com.
  */
 
-import { Resend } from 'resend';
+const POSTAL_API_URL = (process.env.POSTAL_API_URL || 'https://postal.zoepayhub.com').replace(/\/+$/, '');
 
 export interface BookingEmailData {
   name: string;
@@ -35,27 +35,62 @@ export interface ContactFormData {
 }
 
 /**
- * Get Resend client instance
+ * Get the from email address. Must be an address on the Postal-verified domain.
  */
-const getResendClient = () => {
-  const apiKey = process.env.RESEND_API_KEY;
+const getFromEmail = () => {
+  return process.env.EMAIL_FROM || 'Quarhire <info@quarhire.com>';
+};
 
-  if (!apiKey) {
-    console.warn('RESEND_API_KEY not configured. Emails will not be sent.');
-    return null;
-  }
+const getAdminEmail = () => process.env.ADMIN_EMAIL || 'raphael@quarhire.com';
 
-  return new Resend(apiKey);
+type PostalSendInput = {
+  to: string;
+  subject: string;
+  html: string;
+  replyTo?: string;
 };
 
 /**
- * Get the from email address
- * Uses verified domain or Resend's testing domain
+ * Send one message through Postal's HTTP API.
  */
-const getFromEmail = () => {
-  // If you have a verified domain, use it
-  // Otherwise, use Resend's testing domain for development
-  return process.env.EMAIL_FROM || 'Quarhire <onboarding@resend.dev>';
+const sendPostalEmail = async ({ to, subject, html, replyTo }: PostalSendInput): Promise<{ ok: boolean; error?: string }> => {
+  const apiKey = process.env.POSTAL_API_KEY;
+  if (!apiKey) {
+    console.warn('[email] POSTAL_API_KEY not configured');
+    return { ok: false, error: 'Email service not configured (POSTAL_API_KEY missing)' };
+  }
+
+  try {
+    const response = await fetch(`${POSTAL_API_URL}/api/v1/send/message`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Server-API-Key': apiKey,
+      },
+      body: JSON.stringify({
+        to: [to],
+        from: getFromEmail(),
+        subject,
+        html_body: html,
+        plain_body: html.replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim(),
+        ...(replyTo ? { reply_to: replyTo } : {}),
+      }),
+    });
+
+    const data = await response.json().catch(() => null);
+    if (!response.ok || data?.status !== 'success') {
+      const detail = data?.data?.message || data?.message || `Postal HTTP ${response.status}`;
+      console.error('[email] Postal rejected send:', detail);
+      return { ok: false, error: String(detail) };
+    }
+
+    console.log('[email] Sent:', { to: to.replace(/^(.).*(@.*)$/, '$1***$2'), subject });
+    return { ok: true };
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : 'Failed to send email';
+    console.error('[email] Postal request failed:', message);
+    return { ok: false, error: message };
+  }
 };
 
 /** Base URL for payment links in emails */
@@ -392,61 +427,31 @@ const generateAdminNotificationHTML = (data: BookingEmailData): string => {
 /**
  * Send booking confirmation email to customer and admin notification separately
  */
-export const sendBookingEmail = async (data: BookingEmailData): Promise<{ customerSent: boolean; adminSent: boolean }> => {
+export const sendBookingEmail = async (
+  data: BookingEmailData,
+  options: { adminOnly?: boolean } = {},
+): Promise<{ customerSent: boolean; adminSent: boolean }> => {
   const result = { customerSent: false, adminSent: false };
 
   try {
-    const resend = getResendClient();
-
-    if (!resend) {
-      console.warn('Resend client not available. Skipping email send.');
-      return result;
-    }
-
-    const fromEmail = getFromEmail();
-    const adminEmail = process.env.ADMIN_EMAIL;
-
-    // Send confirmation email to customer
-    try {
-      const { data: emailData, error } = await resend.emails.send({
-        from: fromEmail,
+    if (!options.adminOnly) {
+      const customer = await sendPostalEmail({
         to: data.email,
         subject: `Booking ${data.paymentStatus === 'paid' ? 'Confirmation' : 'Reservation'} - ${data.bookingReference || 'Quarhire'}`,
         html: generateBookingEmailHTML(data),
       });
-
-      if (error) {
-        console.error('Error sending customer email:', error);
-      } else {
-        console.log('Customer confirmation email sent:', emailData?.id);
-        result.customerSent = true;
-      }
-    } catch (error) {
-      console.error('Error sending customer email:', error);
+      result.customerSent = customer.ok;
+      if (!customer.ok) console.error('Error sending customer email:', customer.error);
     }
 
-    // Send notification email to admin
-    if (adminEmail) {
-      try {
-        const { data: emailData, error } = await resend.emails.send({
-          from: fromEmail,
-          to: adminEmail,
-          subject: `New Booking ${data.paymentStatus === 'paid' ? '(Paid)' : '(Reservation)'} - ${data.bookingReference || 'Quarhire'}`,
-          html: generateAdminNotificationHTML(data),
-        });
-
-        if (error) {
-          console.error('Error sending admin email:', error);
-        } else {
-          console.log('Admin notification email sent:', emailData?.id);
-          result.adminSent = true;
-        }
-      } catch (error) {
-        console.error('Error sending admin email:', error);
-      }
-    } else {
-      console.warn('ADMIN_EMAIL not configured. Skipping admin notification.');
-    }
+    const admin = await sendPostalEmail({
+      to: getAdminEmail(),
+      subject: `New Booking ${data.paymentStatus === 'paid' ? '(Paid)' : '(Reservation)'} - ${data.bookingReference || 'Quarhire'}`,
+      html: generateAdminNotificationHTML(data),
+      replyTo: data.email,
+    });
+    result.adminSent = admin.ok;
+    if (!admin.ok) console.error('Error sending admin email:', admin.error);
 
     return result;
   } catch (error) {
@@ -677,79 +682,54 @@ const generateInvoiceEmailHTML = (data: InvoiceEmailData): string => {
  */
 export const sendInvoiceEmail = async (data: InvoiceEmailData): Promise<{ success: boolean; error?: string }> => {
   try {
-    const resend = getResendClient();
-    if (!resend) return { success: false, error: 'Email service not configured (RESEND_API_KEY missing)' };
-
-    const fromEmail = getFromEmail();
-    const { data: emailData, error } = await resend.emails.send({
-      from: fromEmail,
+    const sent = await sendPostalEmail({
       to: data.customerEmail,
       subject: `Invoice ${data.reference} - Quarhire`,
       html: generateInvoiceEmailHTML(data),
     });
 
-    if (error) {
-      console.error('Error sending invoice email:', error);
-      return { success: false, error: error.message || 'Email send failed' };
+    if (!sent.ok) {
+      return { success: false, error: sent.error || 'Email send failed' };
     }
 
-    console.log('Invoice email sent:', emailData?.id);
+    const admin = await sendPostalEmail({
+      to: getAdminEmail(),
+      subject: `Invoice sent ${data.reference} - ${data.customerName}`,
+      html: generateInvoiceEmailHTML(data),
+      replyTo: data.customerEmail,
+    });
+    if (!admin.ok) {
+      console.error('Invoice customer email sent, admin copy failed:', admin.error);
+    }
+
     return { success: true };
-  } catch (err: any) {
-    console.error('Error sending invoice email:', err);
-    return { success: false, error: err.message || 'Failed to send invoice email' };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'Failed to send invoice email';
+    console.error('Error sending invoice email:', message);
+    return { success: false, error: message };
   }
 };
 
 /**
  * Send contact form email to admin
  */
-export const sendContactFormEmail = async (data: ContactFormData): Promise<{ success: boolean; error?: string; details?: any }> => {
+export const sendContactFormEmail = async (data: ContactFormData): Promise<{ success: boolean; error?: string }> => {
   try {
-    const resend = getResendClient();
-
-    if (!resend) {
-      const errorMsg = 'Resend client not available. RESEND_API_KEY may be missing or invalid.';
-      console.warn(errorMsg);
-      return { success: false, error: errorMsg };
-    }
-
-    const fromEmail = getFromEmail();
-    const adminEmail = process.env.ADMIN_EMAIL;
-
-    if (!adminEmail) {
-      const errorMsg = 'ADMIN_EMAIL not configured. Please set ADMIN_EMAIL in your environment variables.';
-      console.warn(errorMsg);
-      return { success: false, error: errorMsg };
-    }
-
-    console.log('Attempting to send email:', { from: fromEmail, to: adminEmail, subject: data.subject });
-
-    const { data: emailData, error } = await resend.emails.send({
-      from: fromEmail,
-      to: adminEmail,
+    const sent = await sendPostalEmail({
+      to: getAdminEmail(),
       replyTo: data.email,
       subject: `Contact Form: ${data.subject}`,
       html: generateContactFormHTML(data),
     });
 
-    if (error) {
-      console.error('Resend API error:', error);
-      return { 
-        success: false, 
-        error: `Email service error: ${error.message || 'Unknown error'}`,
-        details: error 
-      };
+    if (!sent.ok) {
+      return { success: false, error: sent.error || 'Email service error' };
     }
 
-    console.log('Contact form email sent successfully:', emailData?.id);
     return { success: true };
-  } catch (error: any) {
-    console.error('Error sending contact form email:', error);
-    return { 
-      success: false, 
-      error: error.message || 'Failed to send email',
-      details: error 
-    };
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : 'Failed to send email';
+    console.error('Error sending contact form email:', message);
+    return { success: false, error: message };
   }
 };

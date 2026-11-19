@@ -9,7 +9,9 @@ import { sendBookingEmail, type BookingEmailData } from '@/lib/email';
  */
 export async function POST(request: NextRequest) {
   try {
-    const data: BookingEmailData = await request.json();
+    const body = await request.json();
+    const data: BookingEmailData = body;
+    const adminOnly = body?.adminOnly === true;
 
     // Validate required fields
     const requiredFields = ['name', 'email', 'phone', 'pickupLocation', 'destination', 'vehicleType', 'date', 'time', 'passengers', 'luggage', 'estimatedPrice', 'paymentStatus'];
@@ -23,7 +25,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Send emails (separate to customer and admin)
-    const emailResult = await sendBookingEmail(data);
+    const emailResult = await sendBookingEmail(data, { adminOnly });
 
     if (emailResult.customerSent || emailResult.adminSent) {
       return NextResponse.json({

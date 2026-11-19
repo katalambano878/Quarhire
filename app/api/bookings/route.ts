@@ -1,6 +1,7 @@
 import { type NextRequest, NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/auth';
 import { supabaseAdmin } from '@/lib/supabase/admin';
+import { sendBookingEmail } from '@/lib/email';
 
 export async function GET(request: NextRequest) {
     try {
@@ -62,7 +63,37 @@ export async function POST(request: NextRequest) {
             throw error;
         }
 
-        return NextResponse.json({ success: true, id: data.id });
+        const reference = body.bookingReference || body.paymentReference || data.id;
+        const emailResult = await sendBookingEmail({
+            name: body.name,
+            email: body.email,
+            phone: body.phone,
+            pickupLocation: body.customPickupLocation || body.pickupLocation,
+            destination: body.customDestination || body.destination,
+            customDestination: body.customDestination || undefined,
+            airline: body.airline || undefined,
+            flightNumber: body.flightNumber || undefined,
+            vehicleType: body.vehicleType,
+            date: body.date,
+            time: body.time,
+            passengers: Number(body.passengers) || 0,
+            luggage: Number(body.luggage) || 0,
+            specialRequests: body.specialRequests || undefined,
+            estimatedPrice: body.estimatedPrice,
+            bookingReference: String(reference),
+            paymentStatus: 'reserved',
+            paymentReference: body.paymentReference || undefined,
+        }, { adminOnly: body.includePayment === true }).catch((emailError) => {
+            console.error('Booking email failed:', emailError);
+            return { customerSent: false, adminSent: false };
+        });
+
+        return NextResponse.json({
+            success: true,
+            id: data.id,
+            adminEmailSent: emailResult.adminSent,
+            customerEmailSent: emailResult.customerSent,
+        });
 
     } catch (error: any) {
         console.error('Booking Creation Error:', error);

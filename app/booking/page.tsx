@@ -81,9 +81,10 @@ function BookingFormContent() {
           body: JSON.stringify({
             ...formData,
             estimatedPrice: `GHS ${priceBreakdown.total}`,
-            paymentStatus: includePayment ? 'pending' : 'pending',
+            paymentStatus: 'pending',
             paymentReference: bookingRef,
-            bookingReference: bookingRef
+            bookingReference: bookingRef,
+            includePayment
           })
         });
 
@@ -98,52 +99,8 @@ function BookingFormContent() {
         console.error('Database save error:', dbError);
       }
 
-      // Prepare email data for the booking email API
-      const emailData = {
-        name: formData.name,
-        email: formData.email,
-        phone: formData.phone,
-        pickupLocation: formData.customPickupLocation || formData.pickupLocation,
-        destination: formData.customDestination || formData.destination,
-        customDestination: formData.customDestination,
-        airline: formData.airline,
-        flightNumber: formData.flightNumber,
-        vehicleType: formData.vehicleType,
-        date: formData.date,
-        time: formData.time,
-        passengers: formData.passengers,
-        luggage: formData.luggage,
-        specialRequests: formData.specialRequests,
-        estimatedPrice: `GHS ${priceBreakdown.total}`,
-        bookingReference: bookingRef,
-        paymentStatus: includePayment ? 'paid' : 'reserved',
-        paymentReference: bookingRef
-      };
-
-      // Send booking confirmation emails to customer and admin
-      // ONLY for non-payment bookings (reservations). Payment bookings get emails after callback.
-      if (!includePayment) {
-        try {
-          const emailResponse = await fetch('/api/booking/email', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify(emailData)
-          });
-
-          if (emailResponse.ok) {
-            const emailResult = await emailResponse.json();
-            console.log('Email sent successfully:', emailResult);
-          } else {
-            const errorData = await emailResponse.json();
-            console.warn('Email API returned error:', errorData);
-          }
-        } catch (emailError) {
-          console.warn('Email sending failed:', emailError);
-          // Continue anyway - we'll still show success to user
-        }
-      }
+      // Booking emails are sent by /api/bookings when the row is saved.
+      // Pay-now bookings email the admin immediately, then customer and admin again after Hubtel confirms payment.
 
       // Also try to submit to external API (legacy)
       try {

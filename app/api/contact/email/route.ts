@@ -44,7 +44,6 @@ export async function POST(request: NextRequest) {
         {
           success: false,
           message: result.error || 'Email could not be sent. Please check email configuration.',
-          details: result.details,
         },
         { status: 500 }
       );
